@@ -30,7 +30,7 @@ python3 -c "import json,sys; d=json.JSONDecoder(strict=False).decode(open('/tmp/
 ```bash
 curl -sS "$BASE/models" "${H[@]:0:4}" | jq -r '.data[].id'
 ```
-Default to the newest Opus-class. Reach for Sonnet-class when speed or run cost matters more for the use case — e.g. high-frequency runs, latency-sensitive paths, or the founder asks for cheaper/faster. Fast mode: pass model as `{"id":"claude-opus-5-5","speed":"fast"}` (Opus 5.5, Opus 5 and Opus 4.8 only). The same object form also takes `effort` (`low`…`max`) and `inference_geo` (`"us"` | `"global"`, Claude 4.6 and later models).
+Default to the newest Opus-class. Reach for Sonnet-class when speed or run cost matters more for the use case — e.g. high-frequency runs, latency-sensitive paths, or the founder asks for cheaper/faster. Fast mode: pass model as `{"id":"claude-opus-5-5","speed":"fast"}` (Opus 5.5, Opus 5 and Opus 4.8 only). The same object form also takes `effort` (`low`·`medium`·`high`·`xhigh`·`max`, or `{"type":"high"}`; `xhigh` isn't accepted by every model) and `inference_geo` (`"us"` | `"global"`, Claude 4.6 and later models). **Don't pick `claude-sonnet-4-5`**: it reaches end of life on 2026-11-30 (use `claude-sonnet-5-5`).
 
 ## 1. Agent (versioned; create once)
 
@@ -43,7 +43,7 @@ ant beta:agents create --name "..." --model '{id: claude-opus-5-5}' \
 ```
 `agent.json` fields: `name`*, `model`*, `system`, `tools`, `mcp_servers`, `skills`, `multiagent`, `execution_identity`, `description`, `metadata`.
 `execution_identity` is optional: omit it (or `{"type":"service_account"}`) for the Anthropic-managed default; `{"type":"aws_role","role_arn":"arn:aws:iam::…:role/…"}` runs as an AWS IAM role (the docs list the shape but not the setup — check before offering it).
-Response: save `id` AND `version` (starts at 1).
+Response: save `id` AND `version` (starts at 1). It echoes the config with defaults resolved: `model` as an object with `effort`, concrete skill versions, and `execution_identity`. Optional header `anthropic-workspace-id: wrkspc_…` is only needed when the key can act on more than one workspace.
 
 **Update** (new version; `version` is optional — pass the current one as a concurrency guard, 409 on mismatch, or omit it for last-write-wins; arrays are FULL replacement, omitted fields preserved):
 ```bash
@@ -52,6 +52,9 @@ curl -sS --fail-with-body "$BASE/agents/$AGENT_ID" "${H[@]}" \
 ant beta:agents update --agent-id "$AGENT_ID" --version "$AGENT_VERSION" --system "..."
 ```
 Then bump `AGENT_VERSION` in IDS.env to the returned version.
+Update gotchas:
+- `model` is whole-object replacement, so resend `inference_geo` or `speed` with it or they're cleared. Omitting `effort` keeps the stored value.
+- A `multiagent_20261001` block **merges** level by level: omitted keys are kept, and `null` resets a key to its default. A sent `predefined_agents` list replaces the stored one.
 Versions list: `GET $BASE/agents/$AGENT_ID/versions` · Archive: `POST $BASE/agents/$AGENT_ID/archive`.
 
 ### Tool config patterns
@@ -72,7 +75,7 @@ Versions list: `GET $BASE/agents/$AGENT_ID/versions` · Archive: `POST $BASE/age
 ]
 "mcp_servers": [{"type": "url", "name": "linear", "url": "https://mcp.linear.app/mcp"}]
 "skills": [{"type": "anthropic", "skill_id": "xlsx"},                  // xlsx | docx | pptx | pdf
-           {"type": "custom", "skill_id": "skill_abc123", "version": "latest"}]
+           {"type": "custom", "skill_id": "skill_abc123"}]   // omit version = latest; or pin "2"
 "multiagent": {"type": "multiagent_20261001",                        // omit/null = single-threaded
   "advisor":   {"type": "enabled", "model": "claude-opus-5-5"},     // default disabled
   "subagents": {"type": "enabled", "inline_agents": {"type": "enabled"},
@@ -80,6 +83,12 @@ Versions list: `GET $BASE/agents/$AGENT_ID/versions` · Archive: `POST $BASE/age
   "workflows": {"type": "disabled"}}                                   // subagents + workflows default ENABLED
 ```
 Built-in tool names: `bash read write edit glob grep web_fetch web_search`. Disable one: `configs:[{"name":"web_fetch","enabled":false}]`.
+Other options:
+- **Domain lists:** `allowed_domains` or `blocked_domains`, never both. An empty list is a 400, so omit the field instead.
+- **`web_fetch` URL sources:** `"url_sources": {"user_input": "all", "server_tool_results": "all", "client_tool_results": "none"}` keeps the agent from fetching URLs that arrive in custom-tool results. Use `{"type":"only","tools":[{"type":"tool_reference","name":"…"}]}` to allow named tools.
+- **`web_fetch` size cap:** `max_content_tokens` limits fetched text per call.
+- **`web_search` locale:** `user_location: {"type":"approximate","country":"DE","city":"Berlin","timezone":"Europe/Berlin"}`.
+- **Size limits:** ≤ 256 tools in total, ≤ 20 `mcp_servers`, and every server needs a matching `mcp_toolset` or create fails.
 Permission policy types: `always_allow` · `always_ask` · `auto` (the server evaluates each call and runs it, denies it, or pauses for approval — not a human checkpoint; keep `always_ask` on anything a person must review).
 
 ## 2. Environment (reusable; not versioned)
