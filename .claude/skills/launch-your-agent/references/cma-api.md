@@ -119,10 +119,25 @@ ant beta:sessions create --agent "$AGENT_ID" --environment-id "$ENV_ID" --title 
 Pin a version: `"agent": {"type":"agent","id":"...","version":1}`.
 Attach memory: `"resources":[{"type":"memory_store","memory_store_id":"memstore_...","access":"read_write","instructions":"..."}]` (creation-time only).
 
-Optional on the same body: `initial_events` (up to 50 `user.message` / `user.define_outcome` events — the session is created already `running`, no separate send), and `agent` as `{"type":"agent_with_overrides","id":"...","model":{...}}` to swap `model`/`system`/`tools`/`mcp_servers`/`skills` for one session without versioning the agent.
+Optional on the same body:
+- `initial_events`: up to 50 `user.message` / `user.define_outcome` events. The session is created already `running`, with no separate send.
+- `agent` as `{"type":"agent_with_overrides","id":"...","model":{...}}`: swaps `model`/`system`/`tools`/`mcp_servers`/`skills` for one session without versioning the agent. Arrays are full replacement and `[]` clears.
+- `metadata`: ≤ 16 pairs. Tag runs here, e.g. `{"case":"golden-01"}` for eval runs.
+- `budget`: `{"type":"limit","max_list_cost":{"amount":"500","currency":"USD"}}`, in cents with no leading zeros. A 400 `model_not_budgetable` means some model in the session has no public list price.
+
+`environment_id` is required. `title` is ≤ 500 chars.
+Repo resource: `{"type":"github_repository","url":"https://github.com/o/r","authorization_token":"…","checkout":{"type":"branch","name":"main"}}`, mounted at `/workspace/<repo>`. The token is required for private repos.
+File resource: `{"type":"file","file_id":"file_…"}`, mounted at `/mnt/session/uploads/<file_id>` unless `mount_path` is set. This is how case inputs reach the agent without pasting them into the prompt.
+Message content can also carry `image` and `document` blocks (`source` as `base64`, `url` or `{"type":"file","file_id"}`; documents also take `text/plain` data plus `title`/`context`).
 
 Statuses: `idle` (waiting — sessions created without `initial_events` start here; a run that finishes returns here) · `running` · `rescheduling` · `terminated` (unrecoverable error, or archived).
-Retrieve: `GET $BASE/sessions/$SESSION_ID` (read `.status`, `.usage`, `.outcome_evaluations[]`).
+Retrieve: `GET $BASE/sessions/$SESSION_ID`. Read:
+- `.status`
+- `.outcome_evaluations[].result`: `pending`/`running`/`evaluating` → `satisfied` | `max_iterations_reached` | `failed` | `interrupted`, plus `.explanation` and `.iteration`
+- `.usage` (tokens, `list_cost`, `active_seconds`)
+- `.stats.duration_seconds`
+- `.deployment_id` (set on deployment-started runs)
+The response also carries `.agent`, a snapshot of the exact agent version that ran. Use it in the run log.
 List: `GET $BASE/sessions?agent_id=$AGENT_ID` · Archive: `POST .../archive` (not while running — interrupt first) · Delete: `DELETE $BASE/sessions/$SESSION_ID`.
 Mid-session you can update a session's `agent.tools`/`agent.mcp_servers` (session-local, full replacement, must be idle): `POST $BASE/sessions/$SESSION_ID` with `{"agent":{"tools":[...],"mcp_servers":[...]}}`.
 
@@ -132,7 +147,7 @@ Mid-session you can update a session's `agent.tools`/`agent.mcp_servers` (sessio
 ```bash
 EVT=$(jq -n --rawfile task first_prompt.txt --rawfile rubric outcome.md \
   '{type:"user.define_outcome", description:$task,
-    rubric:{type:"text", content:$rubric}, max_iterations:3}')      # default 3, max 20
+    rubric:{type:"text", content:$rubric}, max_iterations:3}')      # default 3, max 20; text rubric ≤ 262,144 chars
 curl -sS --fail-with-body "$BASE/sessions/$SESSION_ID/events" "${H[@]}" -d "{\"events\":[$EVT]}"
 ant beta:sessions:events send --session-id "$SESSION_ID" <<YAML
 events:
