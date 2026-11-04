@@ -3,7 +3,7 @@
 
 # CMA API — verified command shapes
 
-> Source: platform.claude.com/docs/en/managed-agents/* (read 2026-06-14; refreshed against the live docs 2026-09-21 — shapes added in that refresh come from the docs and have not been run yet). If a call fails on a field name, the **live docs win** — check, adapt, retry once.
+> Source: platform.claude.com/docs/en/managed-agents/* (read 2026-06-14; refreshed against the live docs 2026-09-21 and 2026-11-04 — shapes added in those refreshes come from the docs and have not been run yet). If a call fails on a field name, the **live docs win** — check, adapt, retry once.
 > Two equivalent surfaces: `ant` CLI (`brew install anthropics/tap/ant`) and curl. The Python/TS SDKs mirror these exactly (`client.beta.<resource>.<verb>`).
 
 ## Setup (every terminal)
@@ -13,7 +13,7 @@ Make getting the key in as low-friction as possible. **First check whether `ANTH
 ```bash
 set -a; source .env; set +a      # ANTHROPIC_API_KEY=sk-ant-...  (founder-created at platform.claude.com → API keys)
 BASE=https://api.anthropic.com/v1
-H=(-H "x-api-key: $ANTHROPIC_API_KEY" -H "anthropic-version: 2023-06-01" \
+H=(-H "x-api-key: $ANTHROPIC_API_KEY" -H "anthropic-version: 2026-10-21" \
    -H "anthropic-beta: managed-agents-2026-04-01" -H "content-type: application/json")
 ```
 
@@ -41,7 +41,8 @@ curl -sS --fail-with-body "$BASE/agents" "${H[@]}" -d @agent.json
 ant beta:agents create --name "..." --model '{id: claude-opus-5-5}' \
   --system "..." --tool '{type: agent_toolset_20260401}'
 ```
-`agent.json` fields: `name`*, `model`*, `system`, `tools`, `mcp_servers`, `skills`, `multiagent`, `description`, `metadata`.
+`agent.json` fields: `name`*, `model`*, `system`, `tools`, `mcp_servers`, `skills`, `multiagent`, `execution_identity`, `description`, `metadata`.
+`execution_identity` is optional: omit it (or `{"type":"service_account"}`) for the Anthropic-managed default; `{"type":"aws_role","role_arn":"arn:aws:iam::…:role/…"}` runs as an AWS IAM role (the docs list the shape but not the setup — check before offering it).
 Response: save `id` AND `version` (starts at 1).
 
 **Update** (new version; `version` is optional — pass the current one as a concurrency guard, 409 on mismatch, or omit it for last-write-wins; arrays are FULL replacement, omitted fields preserved):
@@ -72,7 +73,11 @@ Versions list: `GET $BASE/agents/$AGENT_ID/versions` · Archive: `POST $BASE/age
 "mcp_servers": [{"type": "url", "name": "linear", "url": "https://mcp.linear.app/mcp"}]
 "skills": [{"type": "anthropic", "skill_id": "xlsx"},                  // xlsx | docx | pptx | pdf
            {"type": "custom", "skill_id": "skill_abc123", "version": "latest"}]
-"multiagent": {"type": "coordinator", "agents": [{"type": "agent", "id": "agent_..."}]}
+"multiagent": {"type": "multiagent_20261001",                        // omit/null = single-threaded
+  "advisor":   {"type": "enabled", "model": "claude-opus-5-5"},     // default disabled
+  "subagents": {"type": "enabled", "inline_agents": {"type": "enabled"},
+                "predefined_agents": [{"type": "agent", "id": "agent_..."}, {"type": "self"}]},
+  "workflows": {"type": "disabled"}}                                   // subagents + workflows default ENABLED
 ```
 Built-in tool names: `bash read write edit glob grep web_fetch web_search`. Disable one: `configs:[{"name":"web_fetch","enabled":false}]`.
 Permission policy types: `always_allow` · `always_ask` · `auto` (the server evaluates each call and runs it, denies it, or pauses for approval — not a human checkpoint; keep `always_ask` on anything a person must review).
@@ -194,7 +199,7 @@ Secrets are write-only. Credential `mcp_server_url` must point at the same serve
 Only the right finale when the agent's job actually repeats on a clock — a weekly digest, a nightly sync, a market-hours poll. If the use case is on-demand or event-driven, skip this and the launch script / webhook trigger is the close instead.
 
 ```bash
-curl -sS --fail-with-body "$BASE/deployments?beta=true" "${H[@]}" -d '{
+curl -sS --fail-with-body "$BASE/deployments" "${H[@]}" -d '{
   "name": "<human name>",
   "agent": "'$AGENT_ID'",
   "environment_id": "'$ENV_ID'",
@@ -206,9 +211,9 @@ ant beta:deployments create <<YAML ... YAML
 **`initial_events` are replayed verbatim every run** — the kickoff text must use relative dates ("today", "the last N days as of this run"), never a literal date; re-read it for hard-coded dates before sending.
 Response includes `schedule.upcoming_runs_at` — read it back to the founder to confirm.
 Optional on the same body: `vault_ids`, memory/file/GitHub `resources`, `budget` (same shape as a session budget — see Cost & cleanup; applied to each run separately).
-**Test now:** `curl -X POST -d '{}' "$BASE/deployments/$DEPLOYMENT_ID/run?beta=true" "${H[@]}"` (manual run, creates a session immediately — the explicit `-X POST` matters; a bodyless curl defaults to GET and 405s).
+**Test now:** `curl -X POST -d '{}' "$BASE/deployments/$DEPLOYMENT_ID/run" "${H[@]}"` (manual run, creates a session immediately — the explicit `-X POST` matters; a bodyless curl defaults to GET and 405s).
 Runs history: `GET $BASE/deployment_runs?deployment_id=...&has_error=true`.
-Pause / unpause / archive: `POST $BASE/deployments/$DEPLOYMENT_ID/{pause|unpause|archive}?beta=true`.
+Pause / unpause / archive: `POST $BASE/deployments/$DEPLOYMENT_ID/{pause|unpause|archive}`.
 Cron = 5-field POSIX, minute granularity, IANA timezone, wall-clock DST. Limit 1,000/org.
 
 ## Cost & cleanup

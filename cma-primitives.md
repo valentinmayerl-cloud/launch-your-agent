@@ -12,7 +12,7 @@
 A **hosted agent harness**. You define an agent (model, prompt, tools); Anthropic runs the agent loop, tool execution, and a **sandboxed Linux container** server-side. The alternative is the Messages API (you build your own loop). CMA is for **long-running, asynchronous, stateful** work.
 
 - **Beta:** every request needs header `anthropic-beta: managed-agents-2026-04-01` (SDK sets it automatically). Enabled by default for all API accounts. On the `/v1/memory_stores…` endpoints the docs now send `agent-memory-2026-07-22` in its place — never both on one call, that is a 400 (see Memory stores).
-- **API base:** `https://api.anthropic.com/v1` + `-H "anthropic-version: 2023-06-01"`. Many examples also append `?beta=true` on the URL.
+- **API base:** `https://api.anthropic.com/v1` + `-H "anthropic-version: 2026-10-21"` + `-H "x-api-key: $ANTHROPIC_API_KEY"` (the create-agent reference example uses `Authorization: Bearer` instead; the guides use `x-api-key`). The current docs no longer append `?beta=true`. Optional `anthropic-workspace-id` header, needed only for credentials that span workspaces.
 - **Two surfaces:** `ant` CLI (`brew install anthropics/tap/ant`, or release binary, or `go install`) and curl/SDK (Python, TS, Java, Go, C#, Ruby, PHP). Plus a **Console** UI (platform.claude.com → Managed Agents) with the session list and a session viewer: timeline minimap, transcript grouped by model request, and an Inspector panel (Session · Events · Tools · Resources · Threads tabs, incl. cost and spend against a budget). The session viewer is for Developer and Admin roles only.
 - **CLI extras:** `ant beta:sessions connect <session_id>` (`ant` ≥ 1.32.0) attaches an interactive terminal to a session — follow it live, send messages, interrupt, allow/deny waiting tool calls; `--web` opens the Console session viewer from a local server instead. Needs a real terminal, so scripts use `ant beta:sessions:events stream` / `send`. `ant apply` (`ant` ≥ 1.30.0) creates and updates agents, environments, skills, memory stores and deployments from files in a repo and records their IDs in a `claude-lock.json` lockfile you commit.
 - **Not eligible** for Zero Data Retention or HIPAA BAA (stateful by design). You can delete sessions/files anytime.
@@ -24,7 +24,7 @@ A **hosted agent harness**. You define an agent (model, prompt, tools); Anthropi
 
 | Primitive | What it is | ID prefix |
 |---|---|---|
-| **Agent** | Reusable, **versioned** config: model + system prompt + tools + MCP servers + skills (+ multiagent roster) | `agent_…` |
+| **Agent** | Reusable, **versioned** config: model + system prompt + tools + MCP servers + skills (+ multiagent config) | `agent_…` |
 | **Environment** | Where sessions run: Anthropic cloud sandbox, or self-hosted. **Not versioned.** | (env id) |
 | **Session** | One running agent instance in an environment; holds conversation history + sandbox state | `sesn_…` |
 | **Events** | Bi-directional messages: you send `user.*`/`system.*`; you receive `agent.*`/`session.*`/`span.*` | (event ids) |
@@ -35,7 +35,9 @@ Minimal launch = create agent → create environment → create session → send
 
 ## Agent
 
-**Config fields:** `name`* , `model`* , `system`, `tools`, `mcp_servers`, `skills`, `multiagent`, `description`, `metadata`. (*required)
+**Config fields:** `name`* , `model`* , `system`, `tools`, `mcp_servers`, `skills`, `multiagent`, `execution_identity`, `description`, `metadata`. (*required)
+- **execution_identity:** the principal that runs the agent. Omitted, `null` or `{"type":"service_account"}` stores the Anthropic-managed default. `{"type":"aws_role","role_arn":"…"}` (max 2048 chars) runs as an AWS IAM role. The docs give no run-time or setup details for `aws_role`. Responses always include the field.
+- **Field limits:** `name` 1–256 chars · `description` ≤ 2048 · `system` ≤ 100,000 · `metadata` ≤ 16 pairs (key ≤ 64, value ≤ 512) · ≤ 256 tools across all toolsets · every `mcp_servers` entry must be referenced by an `mcp_toolset` or the request is rejected.
 
 - **model:** any Claude 4.5-family or later. String form `"claude-opus-5-5"`, or object form `{"id":"claude-opus-5-5", …}` with optional `speed` (`"fast"` for fast mode — Opus 5.5, Opus 5 and Opus 4.8 only), `effort` (`low` | `medium` | `high` | `xhigh` | `max`) and `inference_geo` (`"us"` | `"global"`). Response stores the object with defaults filled in (`speed: standard`, the model's default `effort`).
 - **`inference_geo`** pins where **model inference** runs for sessions on this agent (Claude 4.6 and later models only; 400 on older ones; `"us"` is priced at 1.1×; unset = the workspace's default geo). It does not move where data is stored or where the sandbox runs. Must be allowed by the workspace's `allowed_inference_geos`; in a multiagent roster every pin must match or all be unset. Can also be set per session through an `agent_with_overrides` `model` override.
@@ -176,11 +178,24 @@ Register third-party creds once, reference by `vault_ids` at session creation. A
 
 ## Multi-agent sessions
 
-One **coordinator** delegates to a roster of agents, each in its own **session thread** (context-isolated). All threads share the sandbox, filesystem, and vault credentials; tools/MCP/context are NOT shared.
+An agent spawns other agents, each in its own **session thread** (context-isolated). All threads share the sandbox, filesystem, and vault credentials; tools/MCP/context are NOT shared.
 
-- **Declare:** `multiagent:{type:"coordinator", agents:[…]}` on the coordinator agent. Roster entries: `{type:"agent",id}` (latest at create time), `{type:"agent",id,version}` (pinned), `{type:"self"}` (spawn copies), or `{type:"advisor", model:"<model id>"}` (an advisor, below). Roster snapshotted at coordinator create/update — update the coordinator to pick up newer sub-agent versions.
-- **Advisor:** at most one `{type:"advisor", model}` roster entry (can be the only entry) — a model the **primary thread** consults mid-turn for strategic guidance (plan, get unstuck, review before finishing). Must be at least as capable as the agent's own model (else 400). Not a roster agent: the coordinator can't message it, roster agents can't consult it. Each consultation = a short-lived `anthropic.advisor` thread, billed at the advisor model's rates; a failed one never fails the turn.
-- **Depth 1 only.** ≤ 20 unique agents in roster; ≤ **25 concurrent threads** (coordinator may call multiple copies of one agent; advisor consultation threads don't count).
+- **Declare (current, `multiagent_20261001`):**
+  ```json
+  {"type":"multiagent_20261001",
+   "advisor":   {"type":"enabled","model":"claude-opus-5-5"},
+   "subagents": {"type":"enabled","inline_agents":{"type":"enabled"},
+                 "predefined_agents":[{"type":"agent","id":"agent_…","version":1},{"type":"self"}]},
+   "workflows": {"type":"enabled","inline_agents":{"type":"enabled"},
+                 "predefined_agents":[{"type":"agent","id":"agent_…"}]}}
+  ```
+  Omit `multiagent` or send `null` for a single-threaded agent. With the block present, **`subagents` and `workflows` default to enabled** (a `null` sub-field takes its default) and `advisor` defaults to disabled, so set `{"type":"disabled"}` explicitly on anything you don't want.
+- **subagents:** the agent spawns threads that run a **predefined** agent (a saved agent listed in `predefined_agents`) or an **inline** agent (one it defines on the fly; not saved). The coordinator can message these threads.
+- **workflows:** the agent writes a program that runs many agents in phases in the background as one **workflow run**, executed server-side without the main thread driving each step. Plans can use `workflows.predefined_agents` and inline agents. The agent can't send follow-up messages to a run's threads, and each thread is archived by the end of its run.
+- **Predefined-agent entries** (either list): `{"type":"agent","id"}` (pinned to latest at create/update), `{"type":"agent","id","version"}`, a bare `"agent_…"` string, or `{"type":"self"}`. The two lists are separate, each ≤ 20 unique agents. With `inline_agents` disabled the list must be non-empty (400 otherwise).
+- **Advisor:** `{"type":"enabled","model":"<id>"}`. This is a model the **primary thread** consults mid-turn for strategic guidance (plan, get unstuck, review before finishing). It must be at least as capable as the agent's own model (equal is fine; otherwise 400). It reserves the name `anthropic.advisor`, and advice arrives as `agent.thread_message_received`. Each consultation is billed at the advisor model's rates, and a failed one never fails the turn.
+- **Older form `coordinator`** (still accepted; the docs call it older and recommend migrating): `{"type":"coordinator","agents":[…]}`, a 1–20 roster of agent refs, `{"type":"self"}` and at most one `{"type":"advisor","model"}`. It has no workflows and no inline agents.
+- **Depth 1 only:** a listed agent that itself has `multiagent` set → 400. ≤ **25 concurrent child threads** (idle ones count; advisor and workflow-run threads don't). All agents must pin the same `inference_geo`, or none may.
 - **Threads:** primary thread = session-level stream (condensed view: start/end of subagents + blocking events). Drill into a thread via `/v1/sessions/:id/threads/:tid/stream`. List threads; interrupt a thread (`user.interrupt` + `session_thread_id`); archive an idle thread to free the 25-cap.
 - **Patterns:** parallelization, specialization, escalation. MCP servers are agent-scoped; vault creds are session-scoped (apply to all threads — supply a cred for every MCP server used across agents).
 
@@ -227,7 +242,7 @@ Async job that reads a memory store + 1–100 past session transcripts and produ
 ## Rate limits & key limits
 
 - API: create endpoints **300 req/min**; read endpoints **1,200 req/min** (per org). Plus org spend limits + tier rate limits.
-- Outcome `max_iterations`: default 3, max 20. Skills: 500/session. Files: 500/session. Memory: 100kB/memory, 10,000/store, 8 stores/session. Multiagent: 20 roster, 25 threads, depth 1. MCP servers: 20/agent. Vault: 20 creds. Sandbox state: 30 days from sandbox creation.
+- Outcome `max_iterations`: default 3, max 20. Skills: 500/session. Files: 500/session. Memory: 100kB/memory, 10,000/store, 8 stores/session. Multiagent: 20 agents per predefined list, 25 child threads, depth 1. MCP servers: 20/agent. Vault: 20 creds. Sandbox state: 30 days from sandbox creation.
 
 ---
 

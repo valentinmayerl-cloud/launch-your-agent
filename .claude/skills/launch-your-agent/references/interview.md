@@ -19,7 +19,7 @@ The interview is not a form — it's a **mapping exercise**. Every answer locks 
 | When it runs | Session (on-demand) vs Scheduled deployment (cron) vs their-app-triggered |
 | What software the task needs | Environment: `packages`, runtime |
 | What it's allowed to touch | Permission policies, networking allowlist, `read_only` memory |
-| One worker or several | Single agent vs multiagent coordinator + roster |
+| One worker or several | Single agent vs multiagent (subagents, workflows, advisor) |
 | Whether it gets smarter | Memory store(s) + (later) Dreams |
 | Who interacts with it, and how | Their interface: terminal / internal dashboard / their product (→ vault-per-user pattern) |
 
@@ -43,7 +43,7 @@ Anthropic's own framing of the architecture (from the engineering blog) is **bra
 | **Skills** (xlsx/docx/pptx/pdf, custom) | Q4 outputs | `skills[]` in agent.json | Skills | part of agent create | Skills docs "Financial Analyst" |
 | **MCP servers + Vaults** | Q3 inputs behind logins, Q8 per-user pattern | `mcp_servers[]` + vault setup in LAUNCH.md | Connectors & vaults | `POST /v1/vaults` + `/credentials`; `vault_ids` at session/deployment | CMA_operate_in_production; Vaults docs "Alice" |
 | **Custom tools** | Q4 "trigger something in *their* product" | `tools[]` (`type: custom`) + a note in their interface plan | Tools | part of agent create; results via `user.custom_tool_result` | CMA_gate_human_in_the_loop |
-| **Multiagent** (coordinator + roster) | Q8 shape | `multiagent` in agent.json (only when earned) | Agent (roster note) | part of agent create | CMA_coordinate_specialist_team |
+| **Multiagent** (subagents · workflows · advisor) | Q8 shape | `multiagent` in agent.json (only when earned) | Agent (roster note) | part of agent create | CMA_coordinate_specialist_team |
 | **Environment** (packages, networking) | Q3 heavy inputs, Q6 hardening | `environment.json` | Environment | `POST /v1/environments` | Environments docs "data-analysis" |
 | **Session** | Q5 = on-demand; also every eval run | `LAUNCH.md`, IDs in `IDS.env` | header status | `POST /v1/sessions` | Quickstart |
 | **Events** (kickoff, steering, interrupts, confirmations) | Q2 (kickoff content), Q6 (confirmations) | `kickoff.json`, watch section of LAUNCH.md | — (live view stays in Console) | `POST /sessions/:id/events`, SSE stream | Events-and-streaming docs |
@@ -208,7 +208,7 @@ This determines two things: **multiagent or not**, and **what their interface is
 
 Multiagent rules (default is NO):
 - One job, one context → **single agent**. Always start here.
-- Genuinely separable specializations (different tools/credentials/models per role), or fan-out over many independent items, or an escalation tier → **coordinator + roster** (`multiagent`), depth 1, ≤20 roster / ≤25 threads. Build the single most valuable subagent first; the coordinator comes after at least one subagent works alone.
+- Genuinely separable specializations (different tools/credentials/models per role), or fan-out over many independent items, or an escalation tier → `multiagent` (`type: "multiagent_20261001"`): `subagents` for delegated specialists, `workflows` for background fan-out, `advisor` for a stronger model to consult. Depth 1, ≤20 agents per list, ≤25 child threads. Subagents and workflows default to **enabled** once the block exists, so explicitly disable whichever one isn't needed. Build the single most valuable subagent first; the coordinator comes after at least one subagent works alone.
 
 Interface mapping:
 | "Who/where" | What it implies |
